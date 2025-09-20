@@ -23,7 +23,7 @@ classifiers = [
 
 dependencies = [
     "onnx",
-    "onnxruntime",
+    "onnxruntime==1.22.1",
     "numpy",
     "pyopenjtalk",
     "soundfile",
@@ -59,6 +59,6 @@ requires = [
     "pybind11>=2.12.0",
     "cmake>=3.14",
     "patchelf; sys_platform == 'linux' or sys_platform == 'darwin'",
-    "onnxruntime"
+    "onnxruntime==1.22.1"
 ]
 build-backend = "setuptools.build_meta"

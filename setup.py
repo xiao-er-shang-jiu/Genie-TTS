@@ -6,7 +6,7 @@ from pathlib import Path
 from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 import pybind11
-
+import importlib
 
 class CMakeExtension(Extension):
     def __init__(self, name, sourcedir=''):
@@ -70,61 +70,29 @@ class CMakeBuild(build_ext):
     def _find_onnxruntime_paths(self):
         """Find onnxruntime installation paths"""
         try:
-            import onnxruntime
-            onnxruntime_path = Path(onnxruntime.__file__).parent
-            print(f"onnxruntime package path: {onnxruntime_path}")
-
-            # Check for capi directory
-            capi_path = onnxruntime_path / "capi"
-            if capi_path.exists():
-                ort_path = str(capi_path)
-            else:
-                ort_path = str(onnxruntime_path)
-
-            # Find the actual library file
-            library_patterns = [
-                "libonnxruntime.so.*",
-                "libonnxruntime.so",
-                "onnxruntime.dll",
-                "libonnxruntime.dylib"
-            ]
-
-            ort_library_path = None
-            for pattern in library_patterns:
-                if "*" in pattern:
-                    # Handle version-specific patterns
-                    import glob
-                    matches = glob.glob(os.path.join(ort_path, pattern))
-                    if matches:
-                        ort_library_path = matches[0]
-                        break
-                else:
-                    lib_path = os.path.join(ort_path, pattern)
-                    if os.path.exists(lib_path):
-                        ort_library_path = lib_path
-                        break
-
-            if not ort_library_path:
-                # Fallback: try to find any library file
-                for root, dirs, files in os.walk(ort_path):
-                    for file in files:
-                        if (file.startswith("libonnxruntime") and
-                            (file.endswith(".so") or ".so." in file or
-                             file.endswith(".dll") or file.endswith(".dylib"))):
-                            ort_library_path = os.path.join(root, file)
-                            break
-                    if ort_library_path:
-                        break
-
-            if not ort_library_path:
-                raise RuntimeError("Could not find onnxruntime library")
-
-            return ort_library_path
-
+            onnxruntime = importlib.import_module("onnxruntime")
         except ImportError:
-            raise RuntimeError("onnxruntime not found. Please install onnxruntime first.")
-        except Exception as e:
-            raise RuntimeError(f"Error finding onnxruntime: {e}")
+            raise ImportError("onnxruntime is required to use this module.")
+
+        ort_dir = Path(onnxruntime.__file__).parent / "capi"
+        version = onnxruntime.__version__
+
+        if sys.platform.startswith("linux"):
+            libname = "libonnxruntime.so." + version
+            return os.path.join(ort_dir, libname)
+            
+        elif sys.platform == "darwin":
+            # macOS
+            libname = "libonnxruntime.dylib"
+            return os.path.join(ort_dir, libname)
+            
+        elif sys.platform.startswith("win"):
+            # Windows
+            libname = "onnxruntime.dll"
+            return os.path.join(ort_dir, libname)
+            
+        else:
+            raise RuntimeError(f"Unsupported platform: {sys.platform}")
 
 setup(
     ext_modules=[CMakeExtension('T2SOnnxCPURuntime', 'runtime')],
