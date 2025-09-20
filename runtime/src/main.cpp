@@ -25,8 +25,8 @@ public:
     void reset(std::string t2s_encoder_path, std::string t2s_first_stage_decoder_path, std::string t2s_stage_decoder_path) {
         k_cache_.clear();
         v_cache_.clear();
+        y_emb_cache_.clear();
         y_.release();
-        y_emb_.release();
         iteration_ = 0;
         kv_cache_seq_init_len_ = 0;
         y_init_len_ = 0;
@@ -76,6 +76,7 @@ public:
         if (ssl_content_buffer.ndim != 3 || ssl_content_buffer.shape[0] != 1 || ssl_content_buffer.shape[1] != 768)
             throw std::runtime_error("ssl_content must be 3-D with shape (1, 768, ssl_seq_len)!");
         
+        iteration_ = 0;
         kv_cache_seq_init_len_ = ref_seq_buffer.shape[1] + text_seq_buffer.shape[1] + (ssl_content_buffer.shape[2]/2);
         y_init_len_ = ssl_content_buffer.shape[2] / 2; 
         int x_len = ref_seq_buffer.shape[1] + text_seq_buffer.shape[1];
@@ -118,6 +119,8 @@ public:
         //prepare kv_cache for first stage decoder
         k_cache_.clear();
         v_cache_.clear();
+        y_emb_cache_.clear();
+        y_emb_cache_.resize(1 * (y_init_len_ + KV_CACHE_PREPARED_LENGTH) * 512);
         for(int i = 0; i < HEAD_NUM; ++i){
             k_cache_.push_back(std::vector<KVType>((kv_cache_seq_init_len_ + KV_CACHE_PREPARED_LENGTH) * 1 * 512));
             v_cache_.push_back(std::vector<KVType>((kv_cache_seq_init_len_ + KV_CACHE_PREPARED_LENGTH) * 1 * 512));
@@ -133,9 +136,10 @@ public:
         OrtValueShapeType y_shape = {1, y_init_len_+ 1};
         y_ = Ort::Value::CreateTensor<int64_t>(allocator, y_shape.data(), y_shape.size());
         OrtValueShapeType y_emb_shape = {1, y_init_len_, 512};
-        y_emb_ = Ort::Value::CreateTensor<MajorType>(allocator, y_emb_shape.data(), y_emb_shape.size());
+        int y_emb_size = 1 * y_init_len_ * 512;
+        auto y_emb = Ort::Value::CreateTensor<MajorType>(pre_allocated_memory_info, y_emb_cache_.data(), y_emb_size, y_emb_shape.data(), y_emb_shape.size());
         first_step_decoder_iobinding.BindOutput("y", y_);
-        first_step_decoder_iobinding.BindOutput("y_emb", y_emb_);
+        first_step_decoder_iobinding.BindOutput("y_emb", y_emb);
         // Prepare and bind kv_cache inputs
         OrtValueShapeType kv_cache_shape = {kv_cache_seq_init_len_, 1, 512};
         int kv_cache_init_size = kv_cache_seq_init_len_ * 1 * 512;
@@ -153,12 +157,13 @@ public:
 
     bool step_decode(){
         assert(k_cache_.size() == HEAD_NUM && v_cache_.size() == HEAD_NUM);
-        assert(y_.IsTensor() && y_emb_.IsTensor());
+        assert(y_.IsTensor());
         assert(t2s_stage_decoder_session_ != nullptr);
         int current_y_len = y_init_len_ + iteration_ + 1;
         int current_y_emb_len = y_init_len_ + iteration_;
         int current_kv_cache_len = kv_cache_seq_init_len_ + iteration_;
         int kv_cache_current_size = current_kv_cache_len * 1 * 512;
+        int y_emb_current_size = 1 * current_y_emb_len * 512;
 
          // CPU memory info
         Ort::MemoryInfo pre_allocated_memory_info("Cpu", OrtArenaAllocator, 0, OrtMemTypeDefault);
@@ -167,7 +172,9 @@ public:
 
         // Bind inputs
         stage_decoder_iobinding.BindInput("iy", y_);
-        stage_decoder_iobinding.BindInput("iy_emb", y_emb_);
+        OrtValueShapeType y_emb_shape = {1, current_y_emb_len, 512};
+        auto y_emb = Ort::Value::CreateTensor<MajorType>(pre_allocated_memory_info, y_emb_cache_.data(), y_emb_current_size, y_emb_shape.data(), y_emb_shape.size());
+        stage_decoder_iobinding.BindInput("iy_emb", y_emb);
         OrtValueShapeType kv_cache_shape = {current_kv_cache_len, 1, 512};
         for(int i = 0; i < HEAD_NUM; ++i){
             auto k_tensor = Ort::Value::CreateTensor<KVType>(pre_allocated_memory_info, k_cache_[i].data(), kv_cache_current_size, kv_cache_shape.data(), kv_cache_shape.size());
@@ -180,22 +187,23 @@ public:
         OrtValueShapeType y_new_shape = {1, current_y_len + 1};
         Ort::Value y_new = Ort::Value::CreateTensor<int64_t>(allocator, y_new_shape.data(), y_new_shape.size());
         stage_decoder_iobinding.BindOutput("y", y_new);
-        OrtValueShapeType y_emb_new_shape = {1, current_y_emb_len + 1, 512};
-        Ort::Value y_emb_new = Ort::Value::CreateTensor<MajorType>(allocator, y_emb_new_shape.data(), y_emb_new_shape.size());
-        stage_decoder_iobinding.BindOutput("y_emb", y_emb_new);
-
+        OrtValueShapeType y_emb_new_shape = {1, 1, 512};
+        int y_emb_increased_size = 1 * 1 * 512;
+        MajorType* y_emb_out_ptr = y_emb_cache_.data() + y_emb_current_size;
+        Ort::Value y_emb_new = Ort::Value::CreateTensor<MajorType>(pre_allocated_memory_info, y_emb_out_ptr, y_emb_increased_size, y_emb_new_shape.data(), y_emb_new_shape.size());
+        stage_decoder_iobinding.BindOutput("increased_y_emb", y_emb_new);
         bool stop_condition_data = false;
         Ort::Value stop_condition_tensor = Ort::Value::CreateTensor<bool>(pre_allocated_memory_info, &stop_condition_data, 1, nullptr, 0);
         stage_decoder_iobinding.BindOutput("stop_condition_tensor", stop_condition_tensor);
 
 
         OrtValueShapeType kv_cache_shape_out = {1, 1, 512};
-        int kv_cache_out_size = 1 * 1 * 512;
+        int kv_cache_increased_size = 1 * 1 * 512;
         for(int i = 0; i < HEAD_NUM; ++i){
             KVType* k_cache_out_ptr = k_cache_[i].data() + kv_cache_current_size;
             KVType* v_cache_out_ptr = v_cache_[i].data() + kv_cache_current_size;
-            auto k_tensor = Ort::Value::CreateTensor<KVType>(pre_allocated_memory_info, k_cache_out_ptr, kv_cache_out_size, kv_cache_shape_out.data(), kv_cache_shape_out.size());
-            auto v_tensor = Ort::Value::CreateTensor<KVType>(pre_allocated_memory_info, v_cache_out_ptr, kv_cache_out_size, kv_cache_shape_out.data(), kv_cache_shape_out.size());
+            auto k_tensor = Ort::Value::CreateTensor<KVType>(pre_allocated_memory_info, k_cache_out_ptr, kv_cache_increased_size, kv_cache_shape_out.data(), kv_cache_shape_out.size());
+            auto v_tensor = Ort::Value::CreateTensor<KVType>(pre_allocated_memory_info, v_cache_out_ptr, kv_cache_increased_size, kv_cache_shape_out.data(), kv_cache_shape_out.size());
             stage_decoder_iobinding.BindOutput(t2s_stage_decoder_output_names_[3 + i * 2].c_str(), k_tensor);
             stage_decoder_iobinding.BindOutput(t2s_stage_decoder_output_names_[3 + i * 2 + 1].c_str(), v_tensor);
         }
@@ -206,7 +214,6 @@ public:
         stage_decoder_iobinding.SynchronizeOutputs();
 
         std::swap(y_, y_new);
-        std::swap(y_emb_, y_emb_new);
         iteration_ += 1;
 
         return stop_condition_data;
@@ -244,8 +251,8 @@ public:
 private:
     std::vector<std::vector<KVType>> k_cache_;
     std::vector<std::vector<KVType>> v_cache_;
+    std::vector<MajorType> y_emb_cache_;
     Ort::Value y_;
-    Ort::Value y_emb_;
     std::unique_ptr<Ort::Session> t2s_encoder_session_;
     std::unique_ptr<Ort::Session> t2s_first_stage_decoder_session_;
     std::unique_ptr<Ort::Session> t2s_stage_decoder_session_;
