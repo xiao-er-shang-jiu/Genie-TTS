@@ -30,6 +30,7 @@ sdist/
 var/
 wheels/
 *.egg
+*.so
 
 # Editor directories and files
 .idea/
