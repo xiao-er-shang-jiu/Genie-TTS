@@ -33,19 +33,16 @@ if sys.platform.startswith("linux"):
         mode |= ctypes.RTLD_GLOBAL
     lib_path = os.path.join(ort_dir, libname)
     ctypes.CDLL(lib_path, mode=mode)
-    
 elif sys.platform == "darwin":
     # macOS
     libname = "libonnxruntime.dylib"
     lib_path = os.path.join(ort_dir, libname)
     ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-    
 elif sys.platform.startswith("win"):
     # Windows
     libname = "onnxruntime.dll"
     lib_path = os.path.join(ort_dir, libname)
     ctypes.WinDLL(lib_path)
-    
 else:
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
 from T2SOnnxCPURuntime import T2SOnnxCPURuntimeF32
