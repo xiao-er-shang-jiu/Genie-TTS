@@ -13,11 +13,39 @@ from huggingface_hub import hf_hub_download
 from .Utils.Shared import context
 # from .Utils.Constants import PACKAGE_NAME
 from .Utils.Utils import LRUCacheDict
+import sys, ctypes
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 SESS_OPTIONS = onnxruntime.SessionOptions()
 SESS_OPTIONS.log_severity_level = 3
+
+# Load ONNX Runtime shared library with global symbol visibility
+ort_dir = Path(onnxruntime.__file__).parent / "capi"
+version = onnxruntime.__version__
+if sys.platform.startswith("linux"):
+    libname = "libonnxruntime.so." + version
+    mode = 0
+    if hasattr(ctypes, "RTLD_NOW"):
+        mode |= ctypes.RTLD_NOW
+    if hasattr(ctypes, "RTLD_GLOBAL"):
+        mode |= ctypes.RTLD_GLOBAL
+    lib_path = os.path.join(ort_dir, libname)
+    ctypes.CDLL(lib_path, mode=mode)
+elif sys.platform == "darwin":
+    # macOS
+    libname = "libonnxruntime.dylib"
+    lib_path = os.path.join(ort_dir, libname)
+    ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+elif sys.platform.startswith("win"):
+    # Windows
+    libname = "onnxruntime.dll"
+    lib_path = os.path.join(ort_dir, libname)
+    ctypes.WinDLL(lib_path)
+else:
+    raise RuntimeError(f"Unsupported platform: {sys.platform}")
+from T2SOnnxCPURuntime import T2SOnnxCPURuntimeF32
 
 
 class _GSVModelFile:
@@ -33,11 +61,17 @@ class _GSVModelFile:
 
 @dataclass
 class GSVModel:
-    T2S_ENCODER: InferenceSession
-    T2S_FIRST_STAGE_DECODER: InferenceSession
-    T2S_STAGE_DECODER: InferenceSession
     VITS: InferenceSession
-
+    T2S_ENCODER: Optional[InferenceSession] = None
+    T2S_FIRST_STAGE_DECODER: Optional[InferenceSession] = None
+    T2S_STAGE_DECODER: Optional[InferenceSession] = None
+    T2S_CPU_RUNTIME: Optional[T2SOnnxCPURuntimeF32] = None
+    def __post_init__(self):
+        # 验证互斥性
+        if self.T2S_CPU_RUNTIME is not None and (self.T2S_ENCODER is not None or self.T2S_FIRST_STAGE_DECODER is not None or self.T2S_STAGE_DECODER is not None):
+            raise ValueError("T2S_CPU_RUNTIME和其他T2S模型不能同时有值")
+        if self.T2S_CPU_RUNTIME is None and (self.T2S_ENCODER is None and self.T2S_FIRST_STAGE_DECODER is None and self.T2S_STAGE_DECODER is None):
+            raise ValueError("T2S_CPU_RUNTIME和其他T2S模型必须有一个有值")
 
 def convert_bin_to_fp32(
         fp16_bin_path: str, output_fp32_bin_path: str
@@ -85,7 +119,7 @@ def convert_bins_to_fp32(model_dir: str) -> None:
 class ModelManager:
     def __init__(self):
         capacity_str = os.getenv('Max_Cached_Character_Models', '3')
-        self.character_to_model: dict[str, dict[str, InferenceSession]] = LRUCacheDict(
+        self.character_to_model: dict[str, dict[str, InferenceSession | T2SOnnxCPURuntimeF32]] = LRUCacheDict(
             capacity=int(capacity_str))
         self.character_model_paths: dict[str, str] = {}  # 创建一个持久化字典来存储角色模型路径
         self.providers = ["CPUExecutionProvider"]
@@ -118,12 +152,18 @@ class ModelManager:
     def get(self, character_name: str) -> Optional[GSVModel]:
         if character_name in self.character_to_model:
             model_map = self.character_to_model[character_name]
-            return GSVModel(
-                T2S_ENCODER=model_map[_GSVModelFile.T2S_ENCODER],
-                T2S_FIRST_STAGE_DECODER=model_map[_GSVModelFile.T2S_FIRST_STAGE_DECODER],
-                T2S_STAGE_DECODER=model_map[_GSVModelFile.T2S_STAGE_DECODER],
-                VITS=model_map[_GSVModelFile.VITS]
-            )
+            if 'T2SCPURuntime' in model_map and model_map['T2SCPURuntime'] is not None:
+                return GSVModel(
+                    T2S_CPU_RUNTIME=model_map['T2SCPURuntime'],
+                    VITS=model_map[_GSVModelFile.VITS]
+                )
+            else: 
+                return GSVModel(
+                    T2S_ENCODER=model_map[_GSVModelFile.T2S_ENCODER],
+                    T2S_FIRST_STAGE_DECODER=model_map[_GSVModelFile.T2S_FIRST_STAGE_DECODER],
+                    T2S_STAGE_DECODER=model_map[_GSVModelFile.T2S_STAGE_DECODER],
+                    VITS=model_map[_GSVModelFile.VITS]
+                )
         if character_name in self.character_model_paths:
             model_dir = self.character_model_paths[character_name]
             if self.load_character(character_name, model_dir):
@@ -152,20 +192,41 @@ class ModelManager:
                                      _GSVModelFile.T2S_STAGE_DECODER,
                                      _GSVModelFile.VITS]
 
-        for model_file in model_filename:
-            model_path: str = os.path.join(model_dir, model_file)
-            model_path = os.path.normpath(model_path)
+        if len(self.providers) == 1 and self.providers[0] == "CPUExecutionProvider":  # Only CPUExecutionProvider
             try:
-                model_dict[model_file] = onnxruntime.InferenceSession(model_path,
-                                                                      providers=self.providers,
-                                                                      sess_options=SESS_OPTIONS)
-                logger.info(f"Model loaded successfully: {model_path}")
+                model_dict['T2SCPURuntime'] = T2SOnnxCPURuntimeF32(
+                    os.path.normpath(os.path.join(model_dir, _GSVModelFile.T2S_ENCODER)),
+                    os.path.normpath(os.path.join(model_dir, _GSVModelFile.T2S_FIRST_STAGE_DECODER)),
+                    os.path.normpath(os.path.join(model_dir, _GSVModelFile.T2S_STAGE_DECODER))
+                )
+                model_dict[_GSVModelFile.VITS] = onnxruntime.InferenceSession(
+                    os.path.normpath(os.path.join(model_dir, _GSVModelFile.VITS)),
+                    providers=self.providers,
+                    sess_options=SESS_OPTIONS
+                )
+                logger.info(f"T2SOnnxCPURuntimeF32 loaded successfully for character '{character_name}'.")
             except Exception as e:
                 logger.error(
-                    f"Error: Failed to load ONNX model '{model_path}'.\n"
+                    f"Error: Failed to load T2SOnnxCPURuntimeF32 for character '{character_name}'.\n"
                     f"Details: {e}"
                 )
                 return False
+        else:  # Not only CPUExecutionProvider
+            for model_file in model_filename:
+                model_path: str = os.path.join(model_dir, model_file)
+                model_path = os.path.normpath(model_path)
+                try:
+                    model_dict[model_file] = onnxruntime.InferenceSession(model_path,
+                                                                        providers=self.providers,
+                                                                        sess_options=SESS_OPTIONS)
+                    logger.info(f"Model loaded successfully: {model_path}")
+                except Exception as e:
+                    logger.error(
+                        f"Error: Failed to load ONNX model '{model_path}'.\n"
+                        f"Details: {e}"
+                    )
+                    return False
+        
 
         self.character_to_model[character_name] = model_dict
         self.character_model_paths[character_name] = model_dir

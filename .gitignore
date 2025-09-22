@@ -30,6 +30,9 @@ sdist/
 var/
 wheels/
 *.egg
+*.so
+*.pyd
+*.dll
 
 # Editor directories and files
 .idea/

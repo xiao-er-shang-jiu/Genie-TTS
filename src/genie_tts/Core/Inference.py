@@ -6,7 +6,7 @@ import threading
 from ..Audio.ReferenceAudio import ReferenceAudio
 from ..Japanese.JapaneseG2P import japanese_to_phones
 from ..Utils.Constants import BERT_FEATURE_DIM
-
+from ..ModelManager import GSVModel
 
 class GENIE:
     def __init__(self):
@@ -16,23 +16,30 @@ class GENIE:
             self,
             text: str,
             prompt_audio: ReferenceAudio,
-            encoder: ort.InferenceSession,
-            first_stage_decoder: ort.InferenceSession,
-            stage_decoder: ort.InferenceSession,
-            vocoder: ort.InferenceSession,
+            gsv_model: GSVModel
     ) -> Optional[np.ndarray]:
         text_seq: np.ndarray = np.array([japanese_to_phones(text)], dtype=np.int64)
         text_bert = np.zeros((text_seq.shape[1], BERT_FEATURE_DIM), dtype=np.float32)
-        semantic_tokens: np.ndarray = self.t2s_cpu(
-            ref_seq=prompt_audio.phonemes_seq,
-            ref_bert=prompt_audio.text_bert,
-            text_seq=text_seq,
-            text_bert=text_bert,
-            ssl_content=prompt_audio.ssl_content,
-            encoder=encoder,
-            first_stage_decoder=first_stage_decoder,
-            stage_decoder=stage_decoder,
-        )
+        vocoder: ort.InferenceSession = gsv_model.VITS
+        if gsv_model.T2S_CPU_RUNTIME is None:
+            semantic_tokens: np.ndarray = self.t2s_backend(
+                ref_seq=prompt_audio.phonemes_seq,
+                ref_bert=prompt_audio.text_bert,
+                text_seq=text_seq,
+                text_bert=text_bert,
+                ssl_content=prompt_audio.ssl_content,
+                encoder=gsv_model.T2S_ENCODER,
+                first_stage_decoder=gsv_model.T2S_FIRST_STAGE_DECODER,
+                stage_decoder=gsv_model.T2S_STAGE_DECODER,
+            )
+        else:
+            semantic_tokens: np.ndarray = gsv_model.T2S_CPU_RUNTIME.run(
+                prompt_audio.phonemes_seq,
+                text_seq,
+                prompt_audio.text_bert,
+                text_bert,
+                prompt_audio.ssl_content,
+            )
         if self.stop_event.is_set():
             return None
 
@@ -48,7 +55,7 @@ class GENIE:
             "ref_audio": audio_32k
         })[0]
 
-    def t2s_cpu(
+    def t2s_backend(
             self,
             ref_seq: np.ndarray,
             ref_bert: np.ndarray,
@@ -59,7 +66,7 @@ class GENIE:
             first_stage_decoder: ort.InferenceSession,
             stage_decoder: ort.InferenceSession,
     ) -> Optional[np.ndarray]:
-        """在CPU上运行T2S模型"""
+        """在非CPU Backend上运行T2S模型"""
         # Encoder
         x, prompts = encoder.run(
             None,

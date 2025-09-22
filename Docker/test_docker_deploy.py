@@ -44,24 +44,8 @@ Function: Clear the loaded reference audio cache on the server.
 Request Parameters: None.
 """
 
-import os
-
-# (Optional) We recommend manually specifying the Hubert path for Genie.
-# Download from Huggingface: https://huggingface.co/High-Logic/Genie
-# Note: If this line is not set, Genie will automatically download the model from Huggingface.
-os.environ['HUBERT_MODEL_PATH'] = r"C:\path\to\chinese-hubert-base.onnx"
-
-# (Optional) We recommend manually specifying the dictionary path for pyopenjtalk.
-# Download from Huggingface: https://huggingface.co/High-Logic/Genie
-# Note: If this line is not set, pyopenjtalk will automatically download the dictionary.
-os.environ['OPEN_JTALK_DICT_DIR'] = r"C:\path\to\open_jtalk_dic_utf_8-1.11"
-
-import time
 import requests
 import pyaudio
-import multiprocessing
-
-import genie_tts as genie
 
 # --- Configuration ---
 # Server address
@@ -72,11 +56,6 @@ BASE_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
 BYTES_PER_SAMPLE = 2
 CHANNELS = 1
 SAMPLE_RATE = 32000
-
-
-def run_server():
-    genie.start_server(host=SERVER_HOST, port=SERVER_PORT, workers=1)
-
 
 def main_client():
     # 1. Load Character
@@ -112,7 +91,7 @@ def main_client():
     print("\n[Client] Step 3: Requesting TTS and preparing audio stream...")
     tts_payload = {
         "character_name": "misono_mika",  # Use the same character name
-        "text": "どうしようかな……やっぱりやりたいかも……！",  # Replace with the text you want to synthesize
+        "text": "おはようございます",  # Replace with the text you want to synthesize
         "split_sentence": True
     }
 
